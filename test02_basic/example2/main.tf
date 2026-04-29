@@ -52,7 +52,6 @@ resource "aws_subnet" "public_subnet" {
     # 그중에서 0 번 방에 있는 데이터를 연결한다
     availability_zone = data.aws_availability_zones.available.names[0]
 
-
     map_public_ip_on_launch = true # 이방에 생기는 서버는 무조건 공인 ip 를 받는다.
     tags = {
         Name = "lecture-subnet"
@@ -121,7 +120,7 @@ resource "aws_security_group" "ssh_sg" {
         cidr_blocks = ["0.0.0.0/0"] # 외부에서 들어오는 모든 traffic (실무에서는 나의 ip 만)
     }
 
-    # 2. 웹 브라우저 접속 규칙
+    # 2. 웹 브라우저 접속 규칙 (✨새로 추가!✨ - 일반 사용자 접속용)
     ingress {
         from_port   = 80
         to_port     = 80
@@ -152,13 +151,15 @@ data "aws_ami" "latest_al2023" {
 
 # ec2 만들기
 resource "aws_instance" "my_ec2" {
+    # 인스턴스 3개 만들기
+    count = 3
     ami                     = data.aws_ami.latest_al2023.id     # 검색된 최신의 os 이미지 id
     instance_type           = "t3.micro"                        # 서버사양
     subnet_id               = aws_subnet.public_subnet.id       # 위에서 미리 준비한 public subnet 의 id
     vpc_security_group_ids  = [aws_security_group.ssh_sg.id]       # 보안그룹 (여러개 등록할수 있다)
     key_name                = aws_key_pair.kp.key_name          # 위에서 미리 준비한 key pair 의 이름
     tags = {
-        Name = "my-ec2"
+        Name = "my-ec2-${count.index + 1}"
     }
 }
 
@@ -166,7 +167,7 @@ resource "aws_instance" "my_ec2" {
 output "instance_public_ip" {
     description = "만들어진 ec2 의 public ipv4 주소"
     # .public_ip 하면 참조가 가능하다
-    value = aws_instance.my_ec2.public_ip
+    value = aws_instance.my_ec2[*].public_ip
 }
 
 # public ip를 이용해서 inventory.yml 파일 만들기
@@ -176,14 +177,20 @@ resource "local_file" "ansible_inventory" {
     content = yamlencode({
         all = {
             hosts = {
-                "${aws_instance.my_ec2.public_ip}" = {
+                for instance in aws_instance.my_ec2 :
+                # string type key => map type value
+                instance.public_ip => {
                     ansible_user = "ec2-user"
                     ansible_ssh_private_key_file = "${path.module}/lecture-key.pem"
                 }
+                }
             }
-        }
     })
 }
+
+# "${aws_instance.my_ec2.public_ip}" = {
+#                     ansible_user = "ec2-user"
+#                     ansible_ssh_private_key_file = "${path.module}/lecture-key.pem"
 
 # ansible.cfg 파일 생성
 resource "local_file" "ansible_config" {
@@ -203,17 +210,19 @@ resource "terraform_data" "wait_for_instance" {
 
     # ec2의 인스턴스 아이디가 변경된다면 다시 실행하도록 트리거를 설치한다
     # 즉 ec2가 새롭게 만들어지면 이블럭이 다시 실행되고 결과적으로 sleep 30이 다시 실행된다
-    triggers_replace = aws_instance.my_ec2.id
+    triggers_replace = aws_instance.my_ec2[*].id
 
     #local computer (rocky linux)에서 실행할 명령
     provisioner "local-exec" {
-      command = "sleep 30"
+      command = "sleep 60"
     }
 }
 
 resource "terraform_data" "ansible_run" {
     depends_on = [ terraform_data.wait_for_instance ]
-    
+
+    triggers_replace = aws_instance.my_ec2[*].id
+
     provisioner "local-exec" {
       command = "ansible-playbook site.yml"
     }
